@@ -7,6 +7,10 @@
 (define-constant err-insufficient-votes (err u105))
 (define-constant err-invalid-location (err u106))
 
+(define-constant err-invalid-range (err u202))
+
+(define-data-var next-entry-id uint u1)
+
 (define-data-var next-claim-id uint u1)
 (define-data-var minimum-votes uint u3)
 (define-data-var voting-period uint u144)
@@ -176,4 +180,103 @@
     claim (< stacks-block-height (get voting-ends claim))
     false
   )
+)
+
+
+(define-map residency-history
+  { resident: principal, entry-id: uint }
+  {
+    location: (string-ascii 128),
+    verified-at: uint,
+    verification-method: (string-ascii 20),
+    community-score: uint,
+    move-out-date: (optional uint)
+  }
+)
+
+(define-map resident-timeline
+  { resident: principal }
+  { total-entries: uint, current-entry-id: (optional uint), first-verification: uint }
+)
+
+(define-map location-residents
+  { location-hash: (buff 32) }
+  { resident-count: uint, last-verification: uint }
+)
+
+(define-public (record-verification (resident principal) (location (string-ascii 128)) 
+                                  (verification-block uint) (community-votes uint))
+  (let (
+    (entry-id (var-get next-entry-id))
+    (location-hash (sha256 (unwrap-panic (to-consensus-buff? location))))
+    (timeline (default-to { total-entries: u0, current-entry-id: none, first-verification: u0 }
+                         (map-get? resident-timeline { resident: resident })))
+    (location-data (default-to { resident-count: u0, last-verification: u0 }
+                               (map-get? location-residents { location-hash: location-hash })))
+  )
+    (map-set residency-history
+      { resident: resident, entry-id: entry-id }
+      {
+        location: location,
+        verified-at: verification-block,
+        verification-method: "community-vote",
+        community-score: community-votes,
+        move-out-date: none
+      }
+    )
+    
+    (map-set resident-timeline
+      { resident: resident }
+      {
+        total-entries: (+ (get total-entries timeline) u1),
+        current-entry-id: (some entry-id),
+        first-verification: (if (is-eq (get total-entries timeline) u0) 
+                           verification-block 
+                           (get first-verification timeline))
+      }
+    )
+    
+    (map-set location-residents
+      { location-hash: location-hash }
+      {
+        resident-count: (+ (get resident-count location-data) u1),
+        last-verification: verification-block
+      }
+    )
+    
+    (var-set next-entry-id (+ entry-id u1))
+    (ok entry-id)
+  )
+)
+
+(define-public (mark-move-out (entry-id uint) (move-out-block uint))
+  (let (
+    (entry-key { resident: tx-sender, entry-id: entry-id })
+    (entry (unwrap! (map-get? residency-history entry-key) err-not-found))
+  )
+    (map-set residency-history entry-key
+      (merge entry { move-out-date: (some move-out-block) })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-resident-timeline (resident principal))
+  (map-get? resident-timeline { resident: resident })
+)
+
+(define-read-only (get-verification-entry (resident principal) (entry-id uint))
+  (map-get? residency-history { resident: resident, entry-id: entry-id })
+)
+
+(define-read-only (get-location-stats (location (string-ascii 128)))
+  (map-get? location-residents { location-hash: (sha256 (unwrap-panic (to-consensus-buff? location))) })
+)
+
+(define-read-only (calculate-residency-duration (resident principal) (entry-id uint))
+  (match (map-get? residency-history { resident: resident, entry-id: entry-id })
+    entry (match (get move-out-date entry)
+      move-out (some (- move-out (get verified-at entry)))
+      (some (- stacks-block-height (get verified-at entry))))
+    none)
 )
