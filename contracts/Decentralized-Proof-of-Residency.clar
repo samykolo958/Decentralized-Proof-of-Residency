@@ -9,6 +9,13 @@
 
 (define-constant err-invalid-range (err u202))
 
+(define-constant err-endorsement-exists (err u107))
+(define-constant err-not-verified (err u108))
+(define-constant err-self-endorse (err u109))
+
+(define-data-var endorsement-threshold uint u2)
+(define-data-var min-endorser-reputation uint u5)
+
 (define-data-var next-entry-id uint u1)
 
 (define-data-var next-claim-id uint u1)
@@ -279,4 +286,83 @@
       move-out (some (- move-out (get verified-at entry)))
       (some (- stacks-block-height (get verified-at entry))))
     none)
+)
+
+
+(define-map resident-endorsements
+  { claim-id: uint, endorser: principal }
+  { endorsed-at: uint, active: bool }
+)
+
+(define-map claim-endorsement-count
+  { claim-id: uint }
+  { count: uint }
+)
+
+(define-map endorser-stats
+  { endorser: principal }
+  { successful-endorsements: uint, failed-endorsements: uint }
+)
+
+(define-public (endorse-claim (claim-id uint))
+  (let (
+    (claim (unwrap! (map-get? residency-claims { claim-id: claim-id }) err-not-found))
+    (endorser-verified (unwrap! (map-get? verified-residents { resident: tx-sender }) err-not-verified))
+    (endorser-rep (default-to { score: u0, total-votes: u0 } (map-get? voter-reputation { voter: tx-sender })))
+    (endorsement-key { claim-id: claim-id, endorser: tx-sender })
+    (current-count (default-to { count: u0 } (map-get? claim-endorsement-count { claim-id: claim-id })))
+  )
+    (asserts! (is-eq (get status claim) "pending") err-voting-closed)
+    (asserts! (not (is-eq tx-sender (get resident claim))) err-self-endorse)
+    (asserts! (is-none (map-get? resident-endorsements endorsement-key)) err-endorsement-exists)
+    (asserts! (>= (get score endorser-rep) (var-get min-endorser-reputation)) err-owner-only)
+    
+    (map-set resident-endorsements endorsement-key
+      { endorsed-at: stacks-block-height, active: true }
+    )
+    
+    (map-set claim-endorsement-count { claim-id: claim-id }
+      { count: (+ (get count current-count) u1) }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (withdraw-endorsement (claim-id uint))
+  (let (
+    (claim (unwrap! (map-get? residency-claims { claim-id: claim-id }) err-not-found))
+    (endorsement-key { claim-id: claim-id, endorser: tx-sender })
+    (current-count (default-to { count: u0 } (map-get? claim-endorsement-count { claim-id: claim-id })))
+  )
+    (asserts! (is-eq (get status claim) "pending") err-voting-closed)
+    (asserts! (is-some (map-get? resident-endorsements endorsement-key)) err-not-found)
+    
+    (map-delete resident-endorsements endorsement-key)
+    (map-set claim-endorsement-count { claim-id: claim-id }
+      { count: (if (> (get count current-count) u0) (- (get count current-count) u1) u0) }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (get-claim-endorsements (claim-id uint))
+  (map-get? claim-endorsement-count { claim-id: claim-id })
+)
+
+(define-read-only (get-endorser-stats (endorser principal))
+  (map-get? endorser-stats { endorser: endorser })
+)
+
+(define-read-only (get-endorsement-threshold)
+  { threshold: (var-get endorsement-threshold), min-reputation: (var-get min-endorser-reputation) }
+)
+
+(define-read-only (can-auto-verify (claim-id uint))
+  (let (
+    (endorsement-count (default-to { count: u0 } (map-get? claim-endorsement-count { claim-id: claim-id })))
+  )
+    (>= (get count endorsement-count) (var-get endorsement-threshold))
+  )
 )
