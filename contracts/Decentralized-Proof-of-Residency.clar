@@ -366,3 +366,82 @@
     (>= (get count endorsement-count) (var-get endorsement-threshold))
   )
 )
+
+(define-map residency-attestations
+  { claim-id: uint, attestor: principal }
+  { 
+    attested-at: uint,
+    attestor-location: (string-ascii 128),
+    relationship-note: (string-ascii 50),
+    weight: uint
+  }
+)
+
+(define-map claim-attestation-summary
+  { claim-id: uint }
+  { total-attestations: uint, total-weight: uint }
+)
+
+(define-map attestor-activity
+  { attestor: principal }
+  { total-attestations: uint, successful-verifications: uint }
+)
+
+(define-public (attest-residency 
+  (claim-id uint) 
+  (relationship-note (string-ascii 50)))
+  (let (
+    (claim (unwrap! (map-get? residency-claims { claim-id: claim-id }) err-not-found))
+    (attestor-record (unwrap! (map-get? verified-residents { resident: tx-sender }) err-not-verified))
+    (attestor-rep (default-to { score: u0, total-votes: u0 } 
+                              (map-get? voter-reputation { voter: tx-sender })))
+    (attestation-key { claim-id: claim-id, attestor: tx-sender })
+    (current-summary (default-to { total-attestations: u0, total-weight: u0 } 
+                                 (map-get? claim-attestation-summary { claim-id: claim-id })))
+    (attestor-stats (default-to { total-attestations: u0, successful-verifications: u0 }
+                                (map-get? attestor-activity { attestor: tx-sender })))
+    (attestation-weight (+ u1 (/ (get score attestor-rep) u10)))
+  )
+    (asserts! (is-eq (get status claim) "pending") err-voting-closed)
+    (asserts! (not (is-eq tx-sender (get resident claim))) err-self-endorse)
+    (asserts! (is-none (map-get? residency-attestations attestation-key)) err-endorsement-exists)
+    (asserts! (> (len relationship-note) u0) err-invalid-location)
+    
+    (map-set residency-attestations attestation-key
+      {
+        attested-at: stacks-block-height,
+        attestor-location: (get location attestor-record),
+        relationship-note: relationship-note,
+        weight: attestation-weight
+      }
+    )
+    
+    (map-set claim-attestation-summary { claim-id: claim-id }
+      {
+        total-attestations: (+ (get total-attestations current-summary) u1),
+        total-weight: (+ (get total-weight current-summary) attestation-weight)
+      }
+    )
+    
+    (map-set attestor-activity { attestor: tx-sender }
+      {
+        total-attestations: (+ (get total-attestations attestor-stats) u1),
+        successful-verifications: (get successful-verifications attestor-stats)
+      }
+    )
+    
+    (ok attestation-weight)
+  )
+)
+
+(define-read-only (get-claim-attestations (claim-id uint))
+  (map-get? claim-attestation-summary { claim-id: claim-id })
+)
+
+(define-read-only (get-attestation-details (claim-id uint) (attestor principal))
+  (map-get? residency-attestations { claim-id: claim-id, attestor: attestor })
+)
+
+(define-read-only (get-attestor-power (attestor principal))
+  (map-get? attestor-activity { attestor: attestor })
+)
